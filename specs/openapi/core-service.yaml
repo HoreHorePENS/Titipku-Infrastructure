@@ -1,0 +1,1825 @@
+openapi: 3.1.0
+
+info:
+  title: Titipku Core API
+  version: 1.0.0
+  description: |
+    HTTP contract for `core-service`, the modular monolith that powers the
+    Titipku UMKM consignment application: authentication, business profile,
+    products, warung partners, visits, stock (FIFO batches), invoices,
+    payments, and the owner dashboard.
+
+    ## Conventions
+
+    - All application routes are versioned under `/v1`.
+    - Successful responses use a `data` envelope with an optional `meta`.
+    - Errors use an `error` object with a stable `code`, a human-readable
+      `message`, and optional per-field `fields`.
+    - Every response carries a `request_id`, echoed from the `X-Request-ID`
+      request header when present.
+    - Protected endpoints require `Authorization: Bearer <token>`.
+      Tokens are HS256 JWTs scoped to a `business_id` and `member_id`, and
+      every protected route additionally requires the `owner` role.
+    - List endpoints are paginated with `limit` and `offset`; paging metadata
+      is returned in `meta`.
+    - Monetary amounts are integer rupiah (no decimals). Quantities are
+      integers.
+    - Request bodies must be a single JSON object; unknown fields are
+      rejected, and bodies are limited to 1 MiB.
+
+  license:
+    name: Proprietary
+  contact:
+    name: Titipku
+
+servers:
+  - url: http://localhost:8080
+    description: Local development (Docker Compose maps 8080)
+
+tags:
+  - name: Health
+    description: Liveness and readiness probes
+  - name: Auth
+    description: Registration, login, and the current account
+  - name: Business
+    description: Business (tenant) profile
+  - name: Products
+    description: Consignment catalogue owned by the business
+  - name: Partners
+    description: Warung partners the business drops stock to
+  - name: Visits
+    description: Field visits that record stock movements and generate invoices
+  - name: Invoices
+    description: Per-visit receivables
+  - name: Payments
+    description: Partner payments and payment voids
+  - name: Dashboard
+    description: Owner daily overview
+  - name: Public
+    description: Unauthenticated invoice sharing links
+
+security:
+  - bearerAuth: []
+
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      operationId: liveness
+      summary: Liveness probe
+      description: Always succeeds while the process is running; does not touch the database.
+      security: []
+      responses:
+        "200":
+          description: Process is alive.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LivenessResponse"
+
+  /readyz:
+    get:
+      tags: [Health]
+      operationId: readiness
+      summary: Readiness probe
+      description: Pings PostgreSQL (2 second timeout) and reports readiness.
+      security: []
+      responses:
+        "200":
+          description: Service is ready to accept traffic.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessResponse"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/auth/register:
+    post:
+      tags: [Auth]
+      operationId: register
+      summary: Register owner, business, and membership
+      description: |
+        Creates the owner user, the business, and the owner membership in one
+        transaction, then returns a business-scoped JWT.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "201":
+          description: Account created; token issued.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      summary: Authenticate and issue a token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Authentication succeeded.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/auth/me:
+    get:
+      tags: [Auth]
+      operationId: me
+      summary: Current user and business
+      responses:
+        "200":
+          description: The authenticated account.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/business:
+    get:
+      tags: [Business]
+      operationId: getBusiness
+      summary: Get the business profile
+      responses:
+        "200":
+          description: The business profile.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BusinessDataResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    patch:
+      tags: [Business]
+      operationId: updateBusiness
+      summary: Update the business profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateBusinessRequest"
+      responses:
+        "200":
+          description: The updated business profile.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BusinessDataResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/products:
+    get:
+      tags: [Products]
+      operationId: listProducts
+      summary: List products
+      parameters:
+        - $ref: "#/components/parameters/ActiveOnly"
+      responses:
+        "200":
+          description: Products of the business, newest first.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      tags: [Products]
+      operationId: createProduct
+      summary: Create a product
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProductRequest"
+      responses:
+        "201":
+          description: Product created.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/products/{productID}:
+    parameters:
+      - $ref: "#/components/parameters/ProductID"
+    put:
+      tags: [Products]
+      operationId: updateProduct
+      summary: Replace a product
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProductRequest"
+      responses:
+        "200":
+          description: Product updated.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/products/{productID}/status:
+    parameters:
+      - $ref: "#/components/parameters/ProductID"
+    patch:
+      tags: [Products]
+      operationId: setProductActive
+      summary: Activate or deactivate a product
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActiveRequest"
+      responses:
+        "200":
+          description: Product status updated.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/partners:
+    get:
+      tags: [Partners]
+      operationId: listPartners
+      summary: List partners
+      parameters:
+        - $ref: "#/components/parameters/ActiveOnly"
+      responses:
+        "200":
+          description: Partners of the business, newest first.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      tags: [Partners]
+      operationId: createPartner
+      summary: Create a partner
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PartnerRequest"
+      responses:
+        "201":
+          description: Partner created.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/partners/{partnerID}:
+    parameters:
+      - $ref: "#/components/parameters/PartnerID"
+    put:
+      tags: [Partners]
+      operationId: updatePartner
+      summary: Replace a partner
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PartnerRequest"
+      responses:
+        "200":
+          description: Partner updated.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/partners/{partnerID}/status:
+    parameters:
+      - $ref: "#/components/parameters/PartnerID"
+    patch:
+      tags: [Partners]
+      operationId: setPartnerActive
+      summary: Activate or deactivate a partner
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActiveRequest"
+      responses:
+        "200":
+          description: Partner status updated.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/visits:
+    get:
+      tags: [Visits]
+      operationId: listVisits
+      summary: List visits
+      parameters:
+        - $ref: "#/components/parameters/PartnerIDFilter"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Visits, newest first, with page metadata.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VisitListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      tags: [Visits]
+      operationId: createVisit
+      summary: Record a visit
+      description: |
+        Accepts client-calculated field quantities only. The server re-reads
+        previous stock (sum of open FIFO batches) and the unit price
+        (consign price), then saves the visit, FIFO batch movements, the
+        invoice, and an optional payment in a single PostgreSQL transaction
+        (`record_visit` function).
+
+        `sold = prev_stock - remaining - returned`. If that would be
+        negative, or if the resulting batch quantities do not equal
+        `remaining + new_drop`, the request fails with `STOCK_MISMATCH`.
+
+        `client_request_id` makes retries safe: a duplicate key with an
+        identical payload returns the existing visit (HTTP 201), while the
+        same key with a different payload returns `409 IDEMPOTENCY_MISMATCH`.
+
+        Invoice numbering uses the business sequence:
+        `N-YYMMDD-SSSS` in Asia/Jakarta time.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateVisitRequest"
+      responses:
+        "201":
+          description: Visit recorded, or an identical retry replayed.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VisitResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/visits/{visitID}:
+    parameters:
+      - $ref: "#/components/parameters/VisitID"
+    get:
+      tags: [Visits]
+      operationId: getVisit
+      summary: Get a visit
+      responses:
+        "200":
+          description: The visit, including items and share links when billable.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VisitResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/invoices:
+    get:
+      tags: [Invoices]
+      operationId: listInvoices
+      summary: List invoices
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: Filter by payment status. Defaults to `all`.
+          schema:
+            type: string
+            enum: [all, unpaid, partial, paid]
+            default: all
+        - $ref: "#/components/parameters/PartnerIDFilter"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Invoices (without items), newest first, with page metadata.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvoiceListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/invoices/{invoiceID}:
+    parameters:
+      - $ref: "#/components/parameters/InvoiceID"
+    get:
+      tags: [Invoices]
+      operationId: getInvoice
+      summary: Get an invoice
+      description: Includes the visit items that produced the invoice.
+      responses:
+        "200":
+          description: The invoice with items.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvoiceResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/payments:
+    post:
+      tags: [Payments]
+      operationId: createPayment
+      summary: Record a payment
+      description: |
+        Allocates the amount to the partner's oldest unpaid invoices first
+        (`record_payment` function, single transaction). Payments exceeding
+        the partner's receivable are rejected. `client_request_id` makes
+        retries safe (identical payload replays the existing payment;
+        different payload returns `409 IDEMPOTENCY_MISMATCH`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PaymentRequest"
+      responses:
+        "201":
+          description: Payment recorded.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/payments/{paymentID}/void:
+    parameters:
+      - $ref: "#/components/parameters/PaymentID"
+    post:
+      tags: [Payments]
+      operationId: voidPayment
+      summary: Void a payment
+      description: |
+        Reverses the payment's invoice allocations and flags the payment as
+        void. History is preserved; voiding is idempotent.
+      responses:
+        "200":
+          description: Payment voided.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/dashboard:
+    get:
+      tags: [Dashboard]
+      operationId: dashboard
+      summary: Owner dashboard for a day
+      parameters:
+        - name: date
+          in: query
+          required: false
+          description: Day in `YYYY-MM-DD` format, interpreted in WIB (UTC+7). Defaults to today.
+          schema:
+            type: string
+            format: date
+      responses:
+        "200":
+          description: Dashboard summary.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/public/invoices/{token}:
+    get:
+      tags: [Public]
+      operationId: publicInvoice
+      summary: Public invoice view
+      description: |
+        Unauthenticated invoice share link opened by warung partners.
+        Served with `Cache-Control: no-store` and rate limited per client IP
+        (default 60 requests/minute, `429 RATE_LIMITED` with `Retry-After`).
+        Tokens shorter than 20 or longer than 128 characters always return
+        `404`.
+      security: []
+      parameters:
+        - name: token
+          in: path
+          required: true
+          description: Public invoice token (URL-safe base64, 20-128 characters).
+          schema:
+            type: string
+            minLength: 20
+            maxLength: 128
+      responses:
+        "200":
+          description: Public invoice payload.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+            Cache-Control:
+              schema:
+                type: string
+              example: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicInvoiceResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        HS256 JWT issued by `/v1/auth/register` or `/v1/auth/login`.
+        Required claims: `iss`, `sub` (user id), `exp`, `role` (`owner`),
+        `business_id`, and `member_id`.
+
+  headers:
+    XRequestID:
+      description: Request id, echoed from `X-Request-ID` or generated by the server.
+      schema:
+        type: string
+
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Page size.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    Offset:
+      name: offset
+      in: query
+      required: false
+      description: Rows to skip.
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 100000
+        default: 0
+    ActiveOnly:
+      name: active
+      in: query
+      required: false
+      description: When `true`, only active records are returned.
+      schema:
+        type: string
+        enum: ["true"]
+    PartnerIDFilter:
+      name: partner_id
+      in: query
+      required: false
+      description: Filter by partner UUID.
+      schema:
+        type: string
+        format: uuid
+    ProductID:
+      name: productID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    PartnerID:
+      name: partnerID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    VisitID:
+      name: visitID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    InvoiceID:
+      name: invoiceID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    PaymentID:
+      name: paymentID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    BadRequest:
+      description: Validation failed; `fields` maps offending inputs to messages.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: VALIDATION_ERROR
+              message: request validation failed
+              fields:
+                email: must be a valid email address
+            request_id: 0f8d1c0a-4b4e-4a5e-9d2f-7f7f6a4b2c11
+    Unauthorized:
+      description: Missing, invalid, or expired token; or a role/scope problem surfaced as 401.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: UNAUTHORIZED
+              message: invalid or expired access token
+    Forbidden:
+      description: Authenticated but not permitted (non-owner role).
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: FORBIDDEN
+              message: you do not have permission to perform this action
+    NotFound:
+      description: Resource not found.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: NOT_FOUND
+              message: requested resource was not found
+    Conflict:
+      description: |
+        State conflict. Stable codes: `EMAIL_TAKEN`, `WHATSAPP_TAKEN`,
+        `CONFLICT`, `IDEMPOTENCY_MISMATCH`, `STOCK_MISMATCH`,
+        `PAYMENT_EXCEEDS_RECEIVABLE`, `PAYMENT_ALLOCATION_FAILED`,
+        `INCONSISTENT_DATA`.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: IDEMPOTENCY_MISMATCH
+              message: idempotency key was already used with a different payload
+    TooManyRequests:
+      description: Public-endpoint rate limit exceeded.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestID"
+        Retry-After:
+          description: Seconds until the window resets.
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: RATE_LIMITED
+              message: too many requests, please try again later
+    ServiceUnavailable:
+      description: A required dependency (PostgreSQL) is unavailable.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: DEPENDENCY_UNAVAILABLE
+              message: required dependency is unavailable
+
+  schemas:
+    # ----- envelope --------------------------------------------------------
+    PageMeta:
+      type: object
+      required: [total, limit, offset]
+      properties:
+        total:
+          type: integer
+          format: int64
+          description: Total rows matching the filter.
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    ErrorBody:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Stable machine-readable error code.
+          enum:
+            - VALIDATION_ERROR
+            - UNAUTHORIZED
+            - FORBIDDEN
+            - NOT_FOUND
+            - CONFLICT
+            - UNAVAILABLE
+            - METHOD_NOT_ALLOWED
+            - RATE_LIMITED
+            - INTERNAL_ERROR
+            - DEPENDENCY_UNAVAILABLE
+        message:
+          type: string
+        fields:
+          type: object
+          additionalProperties:
+            type: string
+          description: Per-field validation messages.
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          $ref: "#/components/schemas/ErrorBody"
+        request_id:
+          type: string
+
+    # ----- health ----------------------------------------------------------
+    LivenessResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [status]
+          properties:
+            status:
+              type: string
+              const: ok
+        request_id:
+          type: string
+
+    ReadinessResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [status]
+          properties:
+            status:
+              type: string
+              const: ready
+        request_id:
+          type: string
+
+    # ----- auth ------------------------------------------------------------
+    RegisterRequest:
+      type: object
+      additionalProperties: false
+      required: [business_name, owner_name, email, password]
+      properties:
+        business_name:
+          type: string
+          minLength: 2
+          maxLength: 120
+        owner_name:
+          type: string
+          minLength: 2
+          maxLength: 120
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        whatsapp:
+          type: string
+          description: >
+            Optional Indonesian number; normalized to `62...`
+            (`0...` and `8...` prefixes are converted).
+          pattern: "^62[0-9]{8,15}$"
+        password:
+          type: string
+          minLength: 8
+          maxLength: 72
+
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 1
+
+    User:
+      type: object
+      required: [id, email, full_name, role, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+        full_name:
+          type: string
+        role:
+          type: string
+          enum: [owner, admin]
+        created_at:
+          type: string
+          format: date-time
+
+    Business:
+      type: object
+      required: [id, name, owner_name]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        owner_name:
+          type: string
+        whatsapp:
+          type: [string, "null"]
+        address:
+          type: [string, "null"]
+
+    AuthResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [access_token, token_type, expires_at, user, business]
+          properties:
+            access_token:
+              type: string
+            token_type:
+              type: string
+              const: Bearer
+            expires_at:
+              type: string
+              format: date-time
+            user:
+              $ref: "#/components/schemas/User"
+            business:
+              $ref: "#/components/schemas/Business"
+        request_id:
+          type: string
+
+    AccountResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [user, business]
+          properties:
+            user:
+              $ref: "#/components/schemas/User"
+            business:
+              $ref: "#/components/schemas/Business"
+        request_id:
+          type: string
+
+    BusinessDataResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/Business"
+        request_id:
+          type: string
+
+    UpdateBusinessRequest:
+      type: object
+      additionalProperties: false
+      required: [name, owner_name]
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 120
+        owner_name:
+          type: string
+          minLength: 2
+          maxLength: 120
+        whatsapp:
+          type: string
+          description: Empty string clears the value; otherwise normalized to `62...`.
+        address:
+          type: string
+          description: Empty string clears the value.
+
+    # ----- catalog ---------------------------------------------------------
+    Product:
+      type: object
+      required: [id, name, consign_price, retail_price, shelf_life_days, is_active, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        photo_path:
+          type: [string, "null"]
+        consign_price:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Price per unit paid by the partner (used as the visit unit price).
+        retail_price:
+          type: integer
+          format: int64
+          minimum: 0
+        shelf_life_days:
+          type: integer
+          minimum: 1
+          maximum: 3650
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ProductRequest:
+      type: object
+      additionalProperties: false
+      required: [name, consign_price, retail_price, shelf_life_days]
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 120
+        photo_path:
+          type: string
+          description: Optional storage path; empty string stores null.
+        consign_price:
+          type: integer
+          format: int64
+          minimum: 0
+        retail_price:
+          type: integer
+          format: int64
+          minimum: 0
+        shelf_life_days:
+          type: integer
+          minimum: 1
+          maximum: 3650
+        is_active:
+          type: boolean
+          default: true
+
+    ProductResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/Product"
+        request_id:
+          type: string
+
+    ProductListResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Product"
+        request_id:
+          type: string
+
+    ActiveRequest:
+      type: object
+      additionalProperties: false
+      required: [is_active]
+      properties:
+        is_active:
+          type: boolean
+
+    Partner:
+      type: object
+      required: [id, name, owner_name, whatsapp, is_active, receivable, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        owner_name:
+          type: string
+        whatsapp:
+          type: string
+          pattern: "^62[0-9]{8,15}$"
+        address:
+          type: [string, "null"]
+        is_active:
+          type: boolean
+        receivable:
+          type: integer
+          format: int64
+          description: Sum of unpaid invoice balances for this partner.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    PartnerRequest:
+      type: object
+      additionalProperties: false
+      required: [name, owner_name, whatsapp]
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 120
+        owner_name:
+          type: string
+          minLength: 2
+          maxLength: 100
+        whatsapp:
+          type: string
+          description: Required; normalized to `62...`. Unique per business.
+          pattern: "^62[0-9]{8,15}$"
+        address:
+          type: string
+          description: Empty string stores null.
+        is_active:
+          type: boolean
+          default: true
+
+    PartnerResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/Partner"
+        request_id:
+          type: string
+
+    PartnerListResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Partner"
+        request_id:
+          type: string
+
+    # ----- visits ----------------------------------------------------------
+    VisitItem:
+      type: object
+      required: [product_id, product_name, prev_stock, remaining, returned, new_drop, sold, stock_after, unit_price, subtotal]
+      properties:
+        product_id:
+          type: string
+          format: uuid
+        product_name:
+          type: string
+        prev_stock:
+          type: integer
+          format: int64
+          description: Stock at the partner before the visit (sum of open batches).
+        remaining:
+          type: integer
+          format: int64
+          description: Counted stock left at the partner.
+        returned:
+          type: integer
+          format: int64
+          description: Units returned to the business.
+        new_drop:
+          type: integer
+          format: int64
+          description: Fresh units dropped during this visit.
+        sold:
+          type: integer
+          format: int64
+          description: "Server-computed: prev_stock - remaining - returned."
+        stock_after:
+          type: integer
+          format: int64
+          description: "Server-computed: remaining + new_drop."
+        unit_price:
+          type: integer
+          format: int64
+          description: Consign price re-read by the server at visit time.
+        subtotal:
+          type: integer
+          format: int64
+          description: "sold * unit_price."
+
+    VisitItemRequest:
+      type: object
+      additionalProperties: false
+      required: [product_id]
+      properties:
+        product_id:
+          type: string
+          format: uuid
+        remaining:
+          type: integer
+          format: int64
+          minimum: 0
+          default: 0
+        returned:
+          type: integer
+          format: int64
+          minimum: 0
+          default: 0
+        new_drop:
+          type: integer
+          format: int64
+          minimum: 0
+          default: 0
+
+    VisitPaymentRequest:
+      type: object
+      additionalProperties: false
+      required: [client_request_id]
+      description: Optional payment embedded in the visit transaction.
+      properties:
+        client_request_id:
+          type: string
+          format: uuid
+          description: Required when `amount` is greater than zero.
+        amount:
+          type: integer
+          format: int64
+          minimum: 0
+          default: 0
+        method:
+          type: string
+          enum: [cash, transfer, qris, other]
+          default: cash
+        paid_at:
+          type: [string, "null"]
+          format: date-time
+          description: Defaults to the server time; must not be in the future.
+
+    CreateVisitRequest:
+      type: object
+      additionalProperties: false
+      required: [client_request_id, partner_id, items]
+      properties:
+        client_request_id:
+          type: string
+          format: uuid
+          description: Idempotency key, unique per business.
+        partner_id:
+          type: string
+          format: uuid
+        visited_at:
+          type: [string, "null"]
+          format: date-time
+          description: >
+            Defaults to now. Must be at or after 2000-01-01 and no more than
+            5 minutes in the future.
+        received_by:
+          type: string
+          maxLength: 100
+          description: Defaults to the partner owner name when empty.
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/VisitItemRequest"
+        payment:
+          $ref: "#/components/schemas/VisitPaymentRequest"
+
+    Visit:
+      type: object
+      required: [id, number, business_name, partner_id, partner_name, partner_owner_name, partner_whatsapp, visited_at, received_by, total, items, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        number:
+          type: string
+          description: "`N-YYMMDD-SSSS` sequence in Asia/Jakarta time."
+          examples: ["N-261028-0001"]
+        business_name:
+          type: string
+        partner_id:
+          type: string
+          format: uuid
+        partner_name:
+          type: string
+        partner_owner_name:
+          type: string
+        partner_whatsapp:
+          type: string
+        visited_at:
+          type: string
+          format: date-time
+        received_by:
+          type: string
+        total:
+          type: integer
+          format: int64
+        public_token:
+          type: string
+          description: Present when the visit has a total greater than zero.
+        public_invoice_url:
+          type: string
+          description: Frontend link `PUBLIC_WEB_URL/i/{token}`.
+        whatsapp_url:
+          type: string
+          description: Pre-filled `wa.me` share message with the invoice link.
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/VisitItem"
+        created_at:
+          type: string
+          format: date-time
+
+    VisitResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/Visit"
+        request_id:
+          type: string
+
+    VisitListResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Visit"
+        meta:
+          $ref: "#/components/schemas/PageMeta"
+        request_id:
+          type: string
+
+    # ----- billing ---------------------------------------------------------
+    Invoice:
+      type: object
+      required: [id, partner_id, partner_name, partner_whatsapp, visit_id, visit_number, visit_date, received_by, total, paid, remaining, status, issued_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        partner_id:
+          type: string
+          format: uuid
+        partner_name:
+          type: string
+        partner_whatsapp:
+          type: string
+        visit_id:
+          type: string
+          format: uuid
+        visit_number:
+          type: string
+        visit_date:
+          type: string
+          format: date-time
+        received_by:
+          type: string
+        total:
+          type: integer
+          format: int64
+        paid:
+          type: integer
+          format: int64
+        remaining:
+          type: integer
+          format: int64
+          description: "total - paid."
+        status:
+          type: string
+          enum: [unpaid, partial, paid]
+          description: Stored generated column derived from paid vs total.
+        issued_at:
+          type: string
+          format: date-time
+        public_invoice_url:
+          type: string
+        items:
+          type: array
+          description: Present on the single-invoice endpoint only.
+          items:
+            $ref: "#/components/schemas/VisitItem"
+
+    InvoiceResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/Invoice"
+        request_id:
+          type: string
+
+    InvoiceListResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Invoice"
+        meta:
+          $ref: "#/components/schemas/PageMeta"
+        request_id:
+          type: string
+
+    PaymentRequest:
+      type: object
+      additionalProperties: false
+      required: [client_request_id, partner_id, amount]
+      properties:
+        client_request_id:
+          type: string
+          format: uuid
+          description: Idempotency key, unique per business.
+        partner_id:
+          type: string
+          format: uuid
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Must not exceed the partner's outstanding receivable.
+        method:
+          type: string
+          enum: [cash, transfer, qris, other]
+          default: cash
+        paid_at:
+          type: [string, "null"]
+          format: date-time
+          description: Defaults to the server time; must not be more than 5 minutes in the future.
+
+    Payment:
+      type: object
+      required: [id, partner_id, partner_name, amount, method, paid_at, is_void, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        partner_id:
+          type: string
+          format: uuid
+        partner_name:
+          type: string
+        amount:
+          type: integer
+          format: int64
+        method:
+          type: string
+          enum: [cash, transfer, qris, other]
+        paid_at:
+          type: string
+          format: date-time
+        is_void:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    PaymentResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/Payment"
+        request_id:
+          type: string
+
+    # ----- dashboard ---------------------------------------------------------
+    RecentVisit:
+      type: object
+      required: [id, number, partner_id, partner_name, total, status, visited_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        number:
+          type: string
+        partner_id:
+          type: string
+          format: uuid
+        partner_name:
+          type: string
+        total:
+          type: integer
+          format: int64
+        status:
+          type: string
+          enum: [unpaid, partial, paid]
+        visited_at:
+          type: string
+          format: date-time
+
+    PriorityPartner:
+      type: object
+      required: [id, name, owner_name, whatsapp, receivable]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        owner_name:
+          type: string
+        whatsapp:
+          type: string
+        receivable:
+          type: integer
+          format: int64
+        last_visit:
+          type: [string, "null"]
+          format: date-time
+
+    Dashboard:
+      type: object
+      required: [date, receivable, paid_today, visits_today, unpaid_invoices, active_partners, recent_visits, priority_partners]
+      properties:
+        date:
+          type: string
+          description: Dashboard day as `YYYY-MM-DD`.
+        receivable:
+          type: integer
+          format: int64
+          description: Total outstanding across all partners.
+        paid_today:
+          type: integer
+          format: int64
+        visits_today:
+          type: integer
+          format: int64
+        unpaid_invoices:
+          type: integer
+          format: int64
+        active_partners:
+          type: integer
+          format: int64
+        recent_visits:
+          type: array
+          items:
+            $ref: "#/components/schemas/RecentVisit"
+        priority_partners:
+          type: array
+          items:
+            $ref: "#/components/schemas/PriorityPartner"
+
+    DashboardResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/Dashboard"
+        request_id:
+          type: string
+
+    # ----- public invoice ----------------------------------------------------
+    PublicInvoiceItem:
+      type: object
+      required: [product_name, remaining, returned, new_drop, sold, stock_after, unit_price, subtotal]
+      properties:
+        product_name:
+          type: string
+        remaining:
+          type: integer
+          format: int64
+        returned:
+          type: integer
+          format: int64
+        new_drop:
+          type: integer
+          format: int64
+        sold:
+          type: integer
+          format: int64
+        stock_after:
+          type: integer
+          format: int64
+        unit_price:
+          type: integer
+          format: int64
+        subtotal:
+          type: integer
+          format: int64
+
+    PublicInvoice:
+      type: object
+      required: [business, partner, visit_number, visit_date, received_by, items, total, paid, remaining, status]
+      properties:
+        business:
+          type: object
+          required: [name, owner_name]
+          properties:
+            name:
+              type: string
+            owner_name:
+              type: string
+            whatsapp:
+              type: [string, "null"]
+            address:
+              type: [string, "null"]
+        partner:
+          type: object
+          required: [name, owner_name, whatsapp]
+          properties:
+            name:
+              type: string
+            owner_name:
+              type: string
+            whatsapp:
+              type: string
+        visit_number:
+          type: string
+        visit_date:
+          type: string
+          format: date-time
+        received_by:
+          type: string
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/PublicInvoiceItem"
+        total:
+          type: integer
+          format: int64
+        paid:
+          type: integer
+          format: int64
+        remaining:
+          type: integer
+          format: int64
+        status:
+          type: string
+          enum: [unpaid, partial, paid]
+
+    PublicInvoiceResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/PublicInvoice"
+        request_id:
+          type: string

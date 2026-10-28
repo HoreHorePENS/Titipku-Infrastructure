@@ -1,0 +1,400 @@
+openapi: 3.1.0
+
+info:
+  title: Titipku Auth API
+  version: 1.0.0
+  description: |
+    HTTP contract for `auth-service` — registration, login, and the current
+    user for the original Titipku marketplace scaffold.
+
+    > **Legacy scaffold.** This service is retained for reference and is not
+    > part of the deployed Compose stack. The production monolith is
+    > `core-service` (see `core-service.yaml`), which supersedes this API
+    > with business-scoped tokens.
+
+    ## Conventions
+
+    - Versioned routes under `/v1`.
+    - Successful responses use a `data` envelope; errors use an `error`
+      object with a stable `code`, `message`, and optional `fields`.
+      Every response carries a `request_id`.
+    - Protected endpoints require `Authorization: Bearer <token>`.
+      Tokens are HS256 JWTs issued by this service
+      (issuer `titipku`, TTL `24h`); registration always assigns the
+      `customer` role.
+    - Request bodies must be a single JSON object; unknown fields are
+      rejected, bodies are limited to 1 MiB.
+
+  license:
+    name: Proprietary
+
+servers:
+  - url: http://localhost:8081
+    description: Local development (default HTTP_PORT)
+
+tags:
+  - name: Health
+    description: Liveness and readiness probes
+  - name: Auth
+    description: Registration, login, and the current user
+
+security:
+  - bearerAuth: []
+
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      operationId: liveness
+      summary: Liveness probe
+      description: Always succeeds while the process is running; does not touch the database.
+      security: []
+      responses:
+        "200":
+          description: Process is alive.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LivenessResponse"
+
+  /readyz:
+    get:
+      tags: [Health]
+      operationId: readiness
+      summary: Readiness probe
+      description: Pings PostgreSQL (2 second timeout) and reports readiness.
+      security: []
+      responses:
+        "200":
+          description: Service is ready to accept traffic.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessResponse"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/auth/register:
+    post:
+      tags: [Auth]
+      operationId: register
+      summary: Register a customer account
+      description: |
+        Creates a user with role `customer` and returns an access token.
+        The email is stored lowercased and must be unique (case-insensitive).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "201":
+          description: Account created; token issued.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      summary: Authenticate and issue a token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Authentication succeeded.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/auth/me:
+    get:
+      tags: [Auth]
+      operationId: me
+      summary: Current user
+      responses:
+        "200":
+          description: The authenticated user.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserDataResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        HS256 JWT issued by `/v1/auth/register` or `/v1/auth/login`.
+        Required claims: `iss`, `sub` (user id), `exp`, `role`
+        (`customer` on registration).
+
+  headers:
+    XRequestID:
+      description: Request id, echoed from `X-Request-ID` or generated by the server.
+      schema:
+        type: string
+
+  responses:
+    BadRequest:
+      description: Validation failed; `fields` maps offending inputs to messages.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: VALIDATION_ERROR
+              message: request validation failed
+              fields:
+                full_name: must be between 2 and 100 characters
+    Unauthorized:
+      description: Missing, invalid, or expired token; or failed credentials.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: INVALID_CREDENTIALS
+              message: invalid email or password
+    NotFound:
+      description: Resource not found.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: USER_NOT_FOUND
+              message: user not found
+    Conflict:
+      description: "Email already registered (`EMAIL_TAKEN`)."
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: EMAIL_TAKEN
+              message: email is already registered
+    ServiceUnavailable:
+      description: A required dependency (PostgreSQL) is unavailable.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: DEPENDENCY_UNAVAILABLE
+              message: required dependency is unavailable
+
+  schemas:
+    PageMeta:
+      type: object
+      required: [total, limit, offset]
+      properties:
+        total:
+          type: integer
+          format: int64
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    ErrorBody:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - VALIDATION_ERROR
+            - UNAUTHORIZED
+            - FORBIDDEN
+            - NOT_FOUND
+            - CONFLICT
+            - UNAVAILABLE
+            - METHOD_NOT_ALLOWED
+            - RATE_LIMITED
+            - INTERNAL_ERROR
+            - DEPENDENCY_UNAVAILABLE
+        message:
+          type: string
+        fields:
+          type: object
+          additionalProperties:
+            type: string
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          $ref: "#/components/schemas/ErrorBody"
+        request_id:
+          type: string
+
+    LivenessResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [status]
+          properties:
+            status:
+              type: string
+              const: ok
+        request_id:
+          type: string
+
+    ReadinessResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [status]
+          properties:
+            status:
+              type: string
+              const: ready
+        request_id:
+          type: string
+
+    RegisterRequest:
+      type: object
+      additionalProperties: false
+      required: [email, full_name, password]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        full_name:
+          type: string
+          minLength: 2
+          maxLength: 100
+        password:
+          type: string
+          minLength: 8
+          maxLength: 72
+
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 1
+
+    User:
+      type: object
+      required: [id, email, full_name, role, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+        full_name:
+          type: string
+        role:
+          type: string
+          enum: [customer, courier, admin]
+          description: Registration always assigns `customer`.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    AuthResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [access_token, token_type, expires_at, user]
+          properties:
+            access_token:
+              type: string
+            token_type:
+              type: string
+              const: Bearer
+            expires_at:
+              type: string
+              format: date-time
+            user:
+              $ref: "#/components/schemas/User"
+        request_id:
+          type: string
+
+    UserDataResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/User"
+        request_id:
+          type: string

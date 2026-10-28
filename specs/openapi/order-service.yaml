@@ -1,0 +1,546 @@
+openapi: 3.1.0
+
+info:
+  title: Titipku Order API
+  version: 1.0.0
+  description: |
+    HTTP contract for `order-service` — marketplace orders for customers,
+    couriers, and admins in the original Titipku scaffold.
+
+    > **Legacy scaffold.** This service is retained for reference and is not
+    > part of the deployed Compose stack. The customer/courier/order model
+    > predates the consignment domain; the production monolith is
+    > `core-service` (see `core-service.yaml`).
+
+    ## Conventions
+
+    - Versioned routes under `/v1`.
+    - Successful responses use a `data` envelope with optional `meta`;
+      errors use an `error` object with a stable `code`, `message`, and
+      optional `fields`. Every response carries a `request_id`.
+    - All order routes require `Authorization: Bearer <token>` (HS256 JWT,
+      issuer `titipku`). The token's `role` claim drives authorization:
+      `customer`, `courier`, or `admin`.
+    - List endpoints use `limit` and `offset` with `meta.total`.
+    - Monetary amounts are integer rupiah (no decimals).
+    - Request bodies must be a single JSON object; unknown fields are
+      rejected, bodies are limited to 1 MiB.
+
+    ## Roles and visibility
+
+    | Role | Create | List | View | Update status |
+    | --- | --- | --- | --- | --- |
+    | `customer` | yes | own orders | own orders | cancel own orders only |
+    | `courier` | no | assigned orders | assigned orders | accept, then picked_up / delivered (assigned only) |
+    | `admin` | no | all orders | all orders | any transition except accept |
+
+    ## Status state machine
+
+    ```text
+    pending --> accepted --> picked_up --> delivered
+       |           |
+       +---------> cancelled <---+
+    ```
+
+    - `pending -> accepted` (courier accept; assigns the courier) or
+      `pending -> cancelled`
+    - `accepted -> picked_up` or `accepted -> cancelled`
+    - `picked_up -> delivered`
+    - `delivered` and `cancelled` are terminal.
+    - Updates are optimistic: a concurrent modification returns
+      `409 ORDER_CONFLICT`.
+
+  license:
+    name: Proprietary
+
+servers:
+  - url: http://localhost:8083
+    description: Local development (default HTTP_PORT)
+
+tags:
+  - name: Health
+    description: Liveness and readiness probes
+  - name: Orders
+    description: Order creation, listing, and status transitions
+
+security:
+  - bearerAuth: []
+
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      operationId: liveness
+      summary: Liveness probe
+      description: Always succeeds while the process is running; does not touch the database.
+      security: []
+      responses:
+        "200":
+          description: Process is alive.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LivenessResponse"
+
+  /readyz:
+    get:
+      tags: [Health]
+      operationId: readiness
+      summary: Readiness probe
+      description: Pings PostgreSQL (2 second timeout) and reports readiness.
+      security: []
+      responses:
+        "200":
+          description: Service is ready to accept traffic.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessResponse"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/orders:
+    post:
+      tags: [Orders]
+      operationId: createOrder
+      summary: Create an order
+      description: |
+        Customers only. The new order starts in `pending` status with the
+        caller as `customer_id`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateOrderRequest"
+      responses:
+        "201":
+          description: Order created.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrderResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    get:
+      tags: [Orders]
+      operationId: listOrders
+      summary: List orders visible to the caller
+      description: |
+        Scope depends on role: `customer` sees own orders, `courier` sees
+        orders assigned to them, `admin` sees all orders.
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Orders, newest first, with page metadata.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrderListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/orders/{orderID}:
+    parameters:
+      - $ref: "#/components/parameters/OrderID"
+    get:
+      tags: [Orders]
+      operationId: getOrder
+      summary: Get an order
+      description: |
+        Admins may view any order; customers only their own; couriers only
+        orders assigned to them.
+      responses:
+        "200":
+          description: The order.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrderResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/orders/{orderID}/status:
+    parameters:
+      - $ref: "#/components/parameters/OrderID"
+    patch:
+      tags: [Orders]
+      operationId: updateOrderStatus
+      summary: Transition an order status
+      description: |
+        `status` must be one of `accepted`, `picked_up`, `delivered`,
+        `cancelled` (`pending` is rejected). Authorization and allowed
+        transitions depend on the caller's role — see the state machine in
+        the API description. A stale write returns `409 ORDER_CONFLICT`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateStatusRequest"
+      responses:
+        "200":
+          description: Status updated.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrderResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        HS256 JWT issued by `auth-service`. Required claims: `iss`, `sub`
+        (user id), `exp`, `role` (`customer`, `courier`, or `admin`).
+
+  headers:
+    XRequestID:
+      description: Request id, echoed from `X-Request-ID` or generated by the server.
+      schema:
+        type: string
+
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Page size.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    Offset:
+      name: offset
+      in: query
+      required: false
+      description: Rows to skip.
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 1000000
+        default: 0
+    OrderID:
+      name: orderID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    BadRequest:
+      description: Validation failed; `fields` maps offending inputs to messages.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: VALIDATION_ERROR
+              message: request validation failed
+              fields:
+                item_name: must be between 3 and 120 characters
+    Unauthorized:
+      description: Missing, invalid, or expired token.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: UNAUTHORIZED
+              message: invalid or expired access token
+    Forbidden:
+      description: |
+        Role not permitted. Stable codes: `CUSTOMER_ONLY`, `COURIER_ONLY`,
+        `ORDER_ACCESS_DENIED`, `ORDER_NOT_ASSIGNED`, `CANCELLATION_ONLY`,
+        `FORBIDDEN`.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: CUSTOMER_ONLY
+              message: only customers can create orders
+    NotFound:
+      description: "Order not found (`ORDER_NOT_FOUND`)."
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: ORDER_NOT_FOUND
+              message: order not found
+    Conflict:
+      description: |
+        Status conflict. Stable codes: `INVALID_STATUS_TRANSITION`,
+        `ORDER_NOT_AVAILABLE`, `ORDER_CONFLICT`.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: INVALID_STATUS_TRANSITION
+              message: cannot change status from picked_up to cancelled
+    ServiceUnavailable:
+      description: A required dependency (PostgreSQL) is unavailable.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: DEPENDENCY_UNAVAILABLE
+              message: required dependency is unavailable
+
+  schemas:
+    PageMeta:
+      type: object
+      required: [total, limit, offset]
+      properties:
+        total:
+          type: integer
+          format: int64
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    ErrorBody:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - VALIDATION_ERROR
+            - UNAUTHORIZED
+            - FORBIDDEN
+            - NOT_FOUND
+            - CONFLICT
+            - UNAVAILABLE
+            - METHOD_NOT_ALLOWED
+            - RATE_LIMITED
+            - INTERNAL_ERROR
+            - DEPENDENCY_UNAVAILABLE
+        message:
+          type: string
+        fields:
+          type: object
+          additionalProperties:
+            type: string
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          $ref: "#/components/schemas/ErrorBody"
+        request_id:
+          type: string
+
+    LivenessResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [status]
+          properties:
+            status:
+              type: string
+              const: ok
+        request_id:
+          type: string
+
+    ReadinessResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [status]
+          properties:
+            status:
+              type: string
+              const: ready
+        request_id:
+          type: string
+
+    OrderStatus:
+      type: string
+      enum: [pending, accepted, picked_up, delivered, cancelled]
+      description: |
+        Lifecycle of an order. `pending` is the only status set at
+        creation; transitions must follow
+        `pending -> accepted|cancelled`, `accepted -> picked_up|cancelled`,
+        `picked_up -> delivered`.
+
+    CreateOrderRequest:
+      type: object
+      additionalProperties: false
+      required: [item_name, pickup_address, dropoff_address, item_price]
+      properties:
+        item_name:
+          type: string
+          minLength: 3
+          maxLength: 120
+        description:
+          type: string
+          maxLength: 1000
+        pickup_address:
+          type: string
+          minLength: 5
+          maxLength: 255
+        dropoff_address:
+          type: string
+          minLength: 5
+          maxLength: 255
+        item_price:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Required.
+        service_fee:
+          type: integer
+          format: int64
+          minimum: 0
+          default: 0
+
+    UpdateStatusRequest:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [accepted, picked_up, delivered, cancelled]
+          description: "`pending` is rejected by validation."
+
+    Order:
+      type: object
+      required: [id, customer_id, courier_id, item_name, description, pickup_address, dropoff_address, item_price, service_fee, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        customer_id:
+          type: string
+          format: uuid
+        courier_id:
+          type: [string, "null"]
+          format: uuid
+          description: Assigned when a courier accepts the order.
+        item_name:
+          type: string
+        description:
+          type: string
+        pickup_address:
+          type: string
+        dropoff_address:
+          type: string
+        item_price:
+          type: integer
+          format: int64
+        service_fee:
+          type: integer
+          format: int64
+        status:
+          $ref: "#/components/schemas/OrderStatus"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    OrderResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/Order"
+        request_id:
+          type: string
+
+    OrderListResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Order"
+        meta:
+          $ref: "#/components/schemas/PageMeta"
+        request_id:
+          type: string
