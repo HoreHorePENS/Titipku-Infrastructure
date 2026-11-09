@@ -47,6 +47,8 @@ tags:
     description: Consignment catalogue owned by the business
   - name: Partners
     description: Warung partners the business drops stock to
+  - name: Stores
+    description: Public store catalogue backing the map (two-sided marketplace)
   - name: Visits
     description: Field visits that record stock movements and generate invoices
   - name: Invoices
@@ -332,6 +334,196 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/stores:
+    get:
+      tags: [Stores]
+      operationId: listStores
+      summary: List stores for the map
+      description: >
+        Public catalogue of active stores, filterable by viewport bounding box
+        and category. `has_consigned` is resolved for the calling penitip.
+      parameters:
+        - name: min_lat
+          in: query
+          schema: { type: number, format: double }
+        - name: max_lat
+          in: query
+          schema: { type: number, format: double }
+        - name: min_lng
+          in: query
+          schema: { type: number, format: double }
+        - name: max_lng
+          in: query
+          schema: { type: number, format: double }
+        - name: category
+          in: query
+          schema:
+            type: string
+            enum: [warung, kelontong, kafe, resto, minimarket, apotek, roti, lainnya]
+        - name: q
+          in: query
+          description: Case-insensitive name/address search.
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 200, maximum: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        "200":
+          description: Stores matching the filter, ordered by name.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StoreListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [Stores]
+      operationId: createStore
+      summary: Create a store (pemilik_toko only)
+      description: >
+        Used when an existing `pemilik_toko` account has no store yet; normal
+        onboarding creates the store during registration.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StoreRequest"
+      responses:
+        "201":
+          description: Store created.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StoreResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/stores/mine:
+    get:
+      tags: [Stores]
+      operationId: getMyStore
+      summary: Get the caller's store (pemilik_toko only)
+      responses:
+        "200":
+          description: The caller's store.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StoreResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [Stores]
+      operationId: updateMyStore
+      summary: Update the caller's store profile (pemilik_toko only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StoreRequest"
+      responses:
+        "200":
+          description: Store updated.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StoreResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/stores/mine/status:
+    patch:
+      tags: [Stores]
+      operationId: setMyStoreActive
+      summary: Show or hide the store on the map (pemilik_toko only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [is_active]
+              properties:
+                is_active:
+                  type: boolean
+      responses:
+        "200":
+          description: Store status updated.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StoreResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/stores/{storeID}:
+    parameters:
+      - name: storeID
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [Stores]
+      operationId: getStore
+      summary: Store detail for the map popup/detail page
+      responses:
+        "200":
+          description: Store detail.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StoreResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -1025,12 +1217,20 @@ components:
     RegisterRequest:
       type: object
       additionalProperties: false
-      required: [business_name, owner_name, email, password]
+      required: [owner_name, email, password]
       properties:
+        account_type:
+          type: string
+          description: >
+            Persona yang dipilih saat mendaftar. `penitip` (default) membuat
+            user + business + membership; `pemilik_toko` membuat user + store.
+          enum: [penitip, pemilik_toko]
+          default: penitip
         business_name:
           type: string
           minLength: 2
           maxLength: 120
+          description: Wajib untuk `account_type=penitip`.
         owner_name:
           type: string
           minLength: 2
@@ -1049,6 +1249,47 @@ components:
           type: string
           minLength: 8
           maxLength: 72
+        store:
+          $ref: "#/components/schemas/RegisterStore"
+          description: Wajib untuk `account_type=pemilik_toko`.
+
+    RegisterStore:
+      type: object
+      additionalProperties: false
+      required: [name, address, latitude, longitude]
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 120
+        category:
+          type: string
+          enum: [warung, kelontong, kafe, resto, minimarket, apotek, roti, lainnya]
+          default: lainnya
+        description:
+          type: string
+          maxLength: 1000
+        address:
+          type: string
+          minLength: 3
+          maxLength: 300
+        whatsapp:
+          type: string
+          description: Falls back to the account `whatsapp` when omitted.
+          pattern: "^62[0-9]{8,15}$"
+        latitude:
+          type: number
+          format: double
+          minimum: -90
+          maximum: 90
+        longitude:
+          type: number
+          format: double
+          minimum: -180
+          maximum: 180
+        photo_url:
+          type: string
+          maxLength: 500
 
     LoginRequest:
       type: object
@@ -1064,7 +1305,7 @@ components:
 
     User:
       type: object
-      required: [id, email, full_name, role, created_at]
+      required: [id, email, full_name, role, account_type, created_at]
       properties:
         id:
           type: string
@@ -1076,6 +1317,10 @@ components:
         role:
           type: string
           enum: [owner, admin]
+        account_type:
+          type: string
+          description: Persona aplikasi pengguna.
+          enum: [penitip, pemilik_toko]
         created_at:
           type: string
           format: date-time
@@ -1096,13 +1341,53 @@ components:
         address:
           type: [string, "null"]
 
+    Store:
+      type: object
+      required: [id, name, category, address, whatsapp, latitude, longitude, is_active, has_consigned]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        category:
+          type: string
+          enum: [warung, kelontong, kafe, resto, minimarket, apotek, roti, lainnya]
+        description:
+          type: [string, "null"]
+        address:
+          type: string
+        whatsapp:
+          type: string
+        latitude:
+          type: number
+          format: double
+        longitude:
+          type: number
+          format: double
+        photo_url:
+          type: [string, "null"]
+        is_active:
+          type: boolean
+        has_consigned:
+          type: boolean
+          description: >
+            True when the calling penitip's business already consigns to this
+            store. Always false for tokens without a business scope.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
     AuthResponse:
       type: object
       required: [data]
       properties:
         data:
           type: object
-          required: [access_token, token_type, expires_at, user, business]
+          required: [access_token, token_type, expires_at, user]
           properties:
             access_token:
               type: string
@@ -1115,7 +1400,13 @@ components:
             user:
               $ref: "#/components/schemas/User"
             business:
-              $ref: "#/components/schemas/Business"
+              allOf:
+                - $ref: "#/components/schemas/Business"
+              description: Present only for `account_type=penitip`.
+            store:
+              allOf:
+                - $ref: "#/components/schemas/Store"
+              description: Present only for `account_type=pemilik_toko`.
         request_id:
           type: string
 
@@ -1125,12 +1416,18 @@ components:
       properties:
         data:
           type: object
-          required: [user, business]
+          required: [user]
           properties:
             user:
               $ref: "#/components/schemas/User"
             business:
-              $ref: "#/components/schemas/Business"
+              allOf:
+                - $ref: "#/components/schemas/Business"
+              description: Present only for `account_type=penitip`.
+            store:
+              allOf:
+                - $ref: "#/components/schemas/Store"
+              description: Present only for `account_type=pemilik_toko`.
         request_id:
           type: string
 
